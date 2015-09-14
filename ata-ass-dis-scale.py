@@ -5,6 +5,7 @@ import sys
 import xml.etree.ElementTree as ET
 import threading
 import time
+import ipaddress
 
 try:
     import pexpect
@@ -44,10 +45,12 @@ class VeriWavePort(object):
 class VeriWaveClient(object):
     # Class for storing information about VeriWave clients
 
-    def __init__(self, name, ssid, allowed_ports):
+    def __init__(self, name, ssid, allowed_ports, ip_address=None, gateway=None):
         self.name = name
         self.ssid = ssid
         self.allowed_ports = allowed_ports
+        self.ip_address = ip_address
+        self.gateway = gateway
 
     def __repr__(self):
         return "\nname: %s\nssid: %s\nallowed ports: %s\n" % (self.name, self.ssid, self.allowed_ports)
@@ -165,7 +168,7 @@ def initialize_veriwave_port_list(handler, chassis, channel_list):
 
     return veriwave_wireless_port_list, veriwave_wired_port_list
 
-def modify_veriwave_client_list(client_list, port_list, ssid, target_count):
+def modify_veriwave_client_list(client_list, port_list, ssid, target_count, client_network=None):
     # This function adds or subtracts clients from the port and client lists and returns the new list. This function DOES NOT synchronize with the chassis.
 
     # Find the position where we last added a client to the port list. This is important so we maintain even distribution accross the ports.
@@ -186,8 +189,12 @@ def modify_veriwave_client_list(client_list, port_list, ssid, target_count):
         # Add the new client name into the port object it will be associated with
         port_list[add_client_port_iterator].clients.append(client_name)
 
-        # Append the new client object to the end of the client list
-        client_list.append(VeriWaveClient(client_name, ssid, [port_list[add_client_port_iterator].port_name]))
+        if client_network == None:
+            # Append the new client object to the end of the client list without IP address information
+            client_list.append(VeriWaveClient(client_name, ssid, [port_list[add_client_port_iterator].port_name]))
+        else:
+            # Append the new client object to the end of the client list with an iterated IP address
+            client_list.append(VeriWaveClient(client_name, ssid, [port_list[add_client_port_iterator].port_name], list(client_network.hosts())[len(client_list)+10], list(client_network.hosts())[0]))
 
         # Deal with properly iterating the port list insertion point for the next client to be added
         add_client_port_iterator += 1
@@ -386,6 +393,7 @@ def main():
     veriwave_client_list = []
     stop_da_event = threading.Event()
     da_per_10min = 0
+    ip_addressing = 'DHCP'
 
     # Setup the session and log into ATA
     sys.stdout.write('**** Connecting to the chassis. This takes about 5 seconds.\n')
@@ -409,19 +417,67 @@ def main():
         clients_ready, clients_idle, clients_disabled = get_client_info(handler)
         sys.stdout.write('Clients Ready: %s   Clients Idle: %s   Clients Disabled: %s\n' % (0,0,0))
         # Display the main menu
-        sys.stdout.write('1. Modify target client count.\t\t\t\t Current: %s\n' % len(veriwave_client_list))
-        sys.stdout.write('2. Modify target associate/disassociate rate. \t\t Current: %s\n' % (da_per_10min))
-        sys.stdout.write('3. Refresh display.\n')
-        sys.stdout.write('4. Clear config and exit.\n')
+        sys.stdout.write('1. Change settings\t\t\t\t\tCurrent: IP Addressing - %s' % (ip_addressing))
+        sys.stdout.write('2. Modify target client count.\t\t\t\tCurrent: %s\n' % len(veriwave_client_list))
+        sys.stdout.write('3. Modify target associate/disassociate rate. \t\tCurrent: %s\n' % (da_per_10min))
+        sys.stdout.write('4. Refresh display.\n')
+        sys.stdout.write('5. Clear config and exit.\n')
         sys.stdout.write('Please choose: ')
         
         # Read the users input and clean it up
         option = sys.stdin.readline()
         option = option.strip()
 
-        # Modify target client count option.
+        # Modify current global seetings
         if option == '1':
-            # Read the intput for the new value and clean it up
+            settings_options_clean = False
+            while not settings_options_clean:
+                # Read the input for the option and clean it up
+                sys.stdout.write('1. Change client IP Addressing method.\n')
+                sys.stdout.write('Please choose: ')
+                option = sys.stdin.readline()
+                option = option.strip()
+                if option == '1':
+                    settings_option_clean = True
+                    ip_option_clean = False
+                    while not ip_option_clean:
+                        # Display the change client IP addresssing method menu
+                        sys.stdout.write('1. DHCP\n')
+                        sys.stdout.write('1. Static\n')
+                        # Read the input for the option and clean it up
+                        sys.stdout.write('Please choose: ')
+                        option = sys.stdin.readline()
+                        option = option.strip()
+                        if option == '1':
+                            ip_option_clean = True
+                            # Set the IP Addressing method to DHCP
+                            ip_addressing = 'DHCP'
+                        elif option == '2':
+                            ip_option_clean = True
+                            # Set the IP Addressing method to static and get the needed details
+                            ip_addressing = 'Static'
+                            ip_add_input_clean = False
+                            while not ip_add_input_clean:
+                                sys.stdout.write('Enter the client network using prefix length notation. (Example 10.5.0.0/18): ')
+                                ip_address_network = sys.stdin.readline()
+                                ip_address_network = ip_address_network.strip()
+                                try:
+                                    client_network = ipaddress.ip_network(ip_address_network)
+                                    if client_network.hosts() > 10:
+                                        ip_add_input_clean = True
+                                    else:
+                                        sys.stdout.write('This is not enough hosts. Please enter a subnet with more hosts.')
+                                except:
+                                    sys.stdout.write('This address seems to be invalid. Please try again.\n')
+                            sys.stdout.write('New client network is %s. The default gateway for these clients will be %s. This subnet can handle up to %s clients.' % (client_network, client_network.hosts()[0], len(client_network.hosts() - 10)))
+                        else:
+                            sys.stdout.write('Invalid option. Please try again.\n')
+                else:
+                    sys.stdout.write('Invalid option. Please try again.\n')
+
+        # Modify target client count option.
+        elif option == '2':
+            # Read the input for the new value and clean it up
             sys.stdout.write('Please enter new client count: ')
             new_client_count = sys.stdin.readline()
             new_client_count = int(new_client_count.strip())
@@ -438,8 +494,9 @@ def main():
             stop_da_event = threading.Event()
             da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
             da_thread.start()
+
         # Modify target associate disassociate rate option.
-        elif option == '2':
+        elif option == '3':
             # Read the intput for the new value and clean it up
             sys.stdout.write('Please enter new association/disassoication rate in a per client per 10 min value. For example, if you enter 1, each client will disassociate and reassociate once every 10 minutes: ')
             new_ass_dis_rate = sys.stdin.readline()
@@ -450,11 +507,13 @@ def main():
             stop_da_event = threading.Event()
             da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
             da_thread.start()
+
         # Refresh display option.
-        elif option == '3':
-            pass
-        # Clean up and exit option
         elif option == '4':
+            pass
+
+        # Clean up and exit option
+        elif option == '5':
             # Purge everything
             sys.stdout.write('**** Cleaning up the chassis. This can take up to 90 seconds.\n')
             stop_da_event.set()
