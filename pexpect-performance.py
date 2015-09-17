@@ -216,12 +216,14 @@ def ass_dis_manager(handler, client_list, da_per_10min, stop_event):
         while (not stop_event.is_set()):
             for client in client_list:
                 # Disassociate the client.
-                handler[handler_index].sendline('disassociateClient %s' % (client.name))
+                #handler[handler_index].sendline('disassociateClient %s' % (client.name))
                 #handler.expect('admin ready>')
-                time.sleep(delay_time)
+                #time.sleep(delay_time)
                 # Assoicate the client
-                handler[handler_index].sendline('associateClient %s' % (client.name))
+                #handler[handler_index].sendline('associateClient %s' % (client.name))
                 #handler.expect('admin ready>')
+                thread = threading.Thread(target=ass_dis_thread, args=(hander[handler_index], client))
+
                 time.sleep(delay_time)
                 handler_index += 1
                 if handler_index >= len(handler):
@@ -229,6 +231,22 @@ def ass_dis_manager(handler, client_list, da_per_10min, stop_event):
                 # Adding this so we don't have to wait until we have gone thru the entire list. That might take a while depending on the length of the list
                 if stop_event.is_set():
                     break
+            print ('Average execution is: %s' % (sum(timing)/len(timing)))
+
+def ass_dis_thread(handler, client):
+    global timing
+    start = time.time()
+    # Disassociate the client.
+    handler.sendline('disassociateClient %s' % (client.name))
+    handler.expect('admin ready>')
+    time.sleep(delay_time)
+    # Assoicate the client
+    handler.sendline('associateClient %s' % (client.name))
+    handler.expect('admin ready>')
+    end = time.time()
+    timing.append (end - start - delay_time)
+
+timing = []
 
 def main():
     # Setup some constants for the testbed. 
@@ -240,7 +258,7 @@ def main():
     new_client_count = 2500
 
     stop_da_event = threading.Event()
-    da_per_10min = 5000000
+    da_per_10min = 10000
     veriwave_client_list = []
     ass_dis_handler = []
 
