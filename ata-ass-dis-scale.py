@@ -168,7 +168,7 @@ def initialize_veriwave_port_list(handler, chassis, channel_list):
 
     return veriwave_wireless_port_list, veriwave_wired_port_list
 
-def modify_veriwave_client_list(client_list, port_list, ssid, target_count, client_network=None):
+def modify_veriwave_client_list(client_list, port_list, ssid, target_count, client_network=None, aps_per_chamber=4):
     # This function adds or subtracts clients from the port and client lists and returns the new list. This function DOES NOT synchronize with the chassis.
 
     # Setup some variables
@@ -206,9 +206,10 @@ def modify_veriwave_client_list(client_list, port_list, ssid, target_count, clie
     add_client_port_iterator = 0
 
     for i, port in enumerate(port_list):
-        if len(port.clients) < max_client_count:
-            add_client_port_iterator = i
-            break
+        if port.port_num <= aps_per_chamber:
+            if len(port.clients) < max_client_count:
+                add_client_port_iterator = i
+                break
 
     # If the target client count is greater than the current client count then add until they are equal
     while len(client_list) < target_count:
@@ -231,6 +232,12 @@ def modify_veriwave_client_list(client_list, port_list, ssid, target_count, clie
         add_client_port_iterator += 1
         if add_client_port_iterator >= len(port_list):
             add_client_port_iterator = 0
+
+        # Deal with skipping ports if needed
+        while port_list[add_client_port_iterator].port_num <= aps_per_chamber:
+            add_client_port_iterator += 1
+            if add_client_port_iterator >= len(port_list):
+                add_client_port_iterator = 0
 
     # If the target client count is less than the current client count then subtract until they are equal
     while len(client_list) > target_count:
@@ -435,7 +442,7 @@ def main():
     veriwave_client_list = []
     stop_da_event = threading.Event()
     da_per_10min = 0
-    ip_addressing = 'DHCP'
+    ip_addressing = None
 
     # Setup the session and log into ATA
     sys.stdout.write('**** Connecting to the chassis. This takes about 5 seconds.\n')
@@ -588,11 +595,18 @@ def main():
 
         # Modify target client count option.
         elif option == '2':
-            # Read the input for the new value and clean it up
-            sys.stdout.write('Please enter new client count: ')
-            sys.stdout.flush()
-            new_client_count = sys.stdin.readline()
-            new_client_count = int(new_client_count.strip())
+            new_client_count_input_clean = False
+            while not new_client_count_input_clean:
+                # Read the input for the new value and clean it up
+                sys.stdout.write('Please enter new client count: ')
+                sys.stdout.flush()
+                new_client_count = sys.stdin.readline()
+                try:
+                    new_client_count = int(new_client_count.strip())
+                    new_client_count_input_clean = True
+                except:
+                    sys.stdout.write('Not a valid input, please try again.\n')
+
             # Stop the associate/disassociate threader if it is running. If not then this shouldn't affect anything
             stop_da_event.set()
             # Calculate the time it might take to do this and let the user know
@@ -611,11 +625,18 @@ def main():
 
         # Modify target associate disassociate rate option.
         elif option == '3':
-            # Read the intput for the new value and clean it up
-            sys.stdout.write('Please enter new association/disassoication rate in a per client per 10 min value. For example, if you enter 1, each client will disassociate and reassociate once every 10 minutes: ')
-            sys.stdout.flush()
-            new_ass_dis_rate = sys.stdin.readline()
-            da_per_10min = int(new_ass_dis_rate.strip())
+            new_ass_dis_rate_clean = False
+            while not new_ass_dis_rate_clean:
+                # Read the intput for the new value and clean it up
+                sys.stdout.write('Please enter new association/disassoication rate in a per client per 10 min value. For example, if you enter 1, each client will disassociate and reassociate once every 10 minutes: ')
+                sys.stdout.flush()
+                new_ass_dis_rate = sys.stdin.readline()
+                try:
+                    da_per_10min = int(new_ass_dis_rate.strip())
+                    new_ass_dis_rate_clean = True
+                except:
+                    sys.stdout.write('Not a valid input, please try again.\n')
+
             # Stop the current thread if it is running. If not that isn't an issue.
             stop_da_event.set()
             # Kick off the disassociate associate threading manager with the new rate
