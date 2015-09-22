@@ -318,7 +318,7 @@ def sync_veriwave_client_list(handler, sync_client_list):
 
     # If the sync_client_list is empty we should just purge instead of remove.
     if len(sync_client_list) == 0:
-        purge_clients_ports(handler)
+        purge_clients(handler)
 
     # Sync list has stuff in it. Treat normally.
     else:
@@ -412,11 +412,11 @@ def ass_dis_manager(handler, client_list, da_per_10min, stop_event):
             for client in client_list:
                 # Disassociate the client.
                 handler.sendline('disassociateClient %s' % (client.name))
-                handler.expect('admin ready>')
+                #handler.expect('admin ready>')
                 time.sleep(delay_time)
                 # Assoicate the client
                 handler.sendline('associateClient %s' % (client.name))
-                handler.expect('admin ready>')
+                #handler.expect('admin ready>')
                 time.sleep(delay_time)
                 # Adding this so we don't have to wait until we have gone thru the entire list. That might take a while depending on the length of the list
                 if stop_event.is_set():
@@ -492,7 +492,7 @@ def main():
         else:
             disp_authentication = 'WPA2 PSK (' + str(authentication) + ')'
         # Display the main menu    
-        sys.stdout.write('1. Change settings\t\t\t\t\tCurrent: IP Addressing - %s  Authentication - %s\n' % (disp_ip_addressing, disp_authentication))
+        sys.stdout.write('1. Change settings\t\t\t\t\tCurrent: SSID - %s  IP Addressing - %s  Authentication - %s\n' % (client_ssid, disp_ip_addressing, disp_authentication))
         sys.stdout.write('2. Modify target client count.\t\t\t\tCurrent: %s\n' % len(veriwave_client_list))
         sys.stdout.write('3. Modify target associate/disassociate rate. \t\tCurrent: %s\n' % (da_per_10min))
         sys.stdout.write('4. Refresh display.\n')
