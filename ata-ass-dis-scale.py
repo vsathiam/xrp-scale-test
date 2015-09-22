@@ -45,12 +45,13 @@ class VeriWavePort(object):
 class VeriWaveClient(object):
     # Class for storing information about VeriWave clients
 
-    def __init__(self, name, ssid, allowed_ports, ip_address=None, gateway=None):
+    def __init__(self, name, ssid, allowed_ports, ip_address=None, gateway=None, authentication = None):
         self.name = name
         self.ssid = ssid
         self.allowed_ports = allowed_ports
         self.ip_address = ip_address
         self.gateway = gateway
+        self.authentication = authentication
 
     def __repr__(self):
         return "\nname: %s\nssid: %s\nallowed ports: %s ip address: %s gateway: %s\n" % (self.name, self.ssid, self.allowed_ports, self.ip_address, self.gateway)
@@ -131,7 +132,6 @@ def initialize_veriwave_port_list(handler, chassis, channel_list):
     get_chassis_info_xml = ET.fromstring('\n'.join(get_chassis_info_output.split('\n')[1:]))
 
     # Initialize some variables
-    channel_iterator = 0
     veriwave_wireless_port_list = []
     veriwave_wired_port_list = []
 
@@ -156,11 +156,8 @@ def initialize_veriwave_port_list(handler, chassis, channel_list):
                 slot_num = int(slot.tag.split('_')[1])
                 port_num = int(port.tag.split('_')[1])
                 # Set the channel from the channel list passed to the function. Iterate through the list evenly. Roll back to the beginning when we hit the end.
-                channel = channel_list[channel_iterator]
-                channel_iterator += 1
-                if channel_iterator == len(channel_list):
-                    channel_iterator = 0
-                # Insert new VeriWave Port object into list
+                channel = channel_list[port_num - 1]
+
                 if port_type == 'WLAN':
                     veriwave_wireless_port_list.append(VeriWavePort(chassis, slot_num, port_num, port_name, channel, port_type))
                 else:
@@ -168,7 +165,7 @@ def initialize_veriwave_port_list(handler, chassis, channel_list):
 
     return veriwave_wireless_port_list, veriwave_wired_port_list
 
-def modify_veriwave_client_list(client_list, port_list, ssid, target_count, client_network=None, aps_per_chamber=4):
+def modify_veriwave_client_list(client_list, port_list, ssid, target_count, client_network=None, authentication = None, aps_per_chamber=4):
     # This function adds or subtracts clients from the port and client lists and returns the new list. This function DOES NOT synchronize with the chassis.
 
     # Setup some variables
@@ -222,11 +219,11 @@ def modify_veriwave_client_list(client_list, port_list, ssid, target_count, clie
 
         if client_network == None:
             # Append the new client object to the end of the client list without IP address information (DHCP)
-            client_list.append(VeriWaveClient(client_name, ssid, [port_list[add_client_port_iterator].port_name]))
+            client_list.append(VeriWaveClient(client_name, ssid, port_list[add_client_port_iterator].port_name, authentication))
         else:
             # Append the new client object to the end of the client list with an iterated IP address (Static)
             client_interface = ipaddress.IPv4Interface(str(list(client_network.hosts())[len(client_list)+ip_host_offset]) + '/' + client_netmask)
-            client_list.append(VeriWaveClient(client_name, ssid, [port_list[add_client_port_iterator].port_name], client_interface, client_gateway))
+            client_list.append(VeriWaveClient(client_name, ssid, port_list[add_client_port_iterator].port_name, client_interface, client_gateway, authentication))
 
         # Deal with properly iterating the port list insertion point for the next client to be added
         add_client_port_iterator += 1
@@ -234,7 +231,7 @@ def modify_veriwave_client_list(client_list, port_list, ssid, target_count, clie
             add_client_port_iterator = 0
 
         # Deal with skipping ports if needed
-        while port_list[add_client_port_iterator].port_num <= aps_per_chamber:
+        while port_list[add_client_port_iterator].port_num > aps_per_chamber:
             add_client_port_iterator += 1
             if add_client_port_iterator >= len(port_list):
                 add_client_port_iterator = 0
@@ -319,49 +316,65 @@ def purge_clients(handler):
 def sync_veriwave_client_list(handler, sync_client_list):
     # This function synchronizes the ATA client configuration to the sync_client_list that is passed to it.
 
-    # Setup out variables
-    clear_client_list = list()
-    add_client_list = list()
+    # If the sync_client_list is empty we should just purge instead of remove.
+    if len(sync_client_list) == 0:
+        purge_clients_ports(handler)
 
-    # Send to command to list all of the clients and grab the output.
-    handler.sendline('list clients')
-    handler.expect('admin ready>')
-    list_clients_output = handler.before.decode('utf-8', 'ignore')
+    # Sync list has stuff in it. Treat normally.
+    else:
+        # Setup out variables
+        clear_client_list = list()
+        add_client_list = list()
 
-    # Parse the output into XML handler.  Weirdness in string formatting is because the output includes the 'list clients' command we typed above.
-    list_clients_xml = ET.fromstring('\n'.join(list_clients_output.split('\n')[1:]))
+        # Send to command to list all of the clients and grab the output.
+        handler.sendline('list clients')
+        handler.expect('admin ready>')
+        list_clients_output = handler.before.decode('utf-8', 'ignore')
 
-    # Collects the clients we need to add based off the XML output
-    for sync_client in sync_client_list:
-        sync_client_found = False
-        for client in list_clients_xml.findall('./singleList/client'):
-            if sync_client.name == client.find('name').text:
-                sync_client_found = True
-        if not sync_client_found:
-            add_client_list.append(sync_client)
+        # Parse the output into XML handler.  Weirdness in string formatting is because the output includes the 'list clients' command we typed above.
+        list_clients_xml = ET.fromstring('\n'.join(list_clients_output.split('\n')[1:]))
 
-    # Collects the clients we need to remove based off the XML output
-    for client in list_clients_xml.findall('./singleList/client'):
-        sync_client_found = False
+        # Collects the clients we need to add based off the XML output
         for sync_client in sync_client_list:
-            if sync_client.name == client.find('name').text:
-                sync_client_found = True
-        if not sync_client_found:
-            clear_client_list.append(sync_client)
+            sync_client_found = False
+            for client in list_clients_xml.findall('./singleList/client'):
+                if sync_client.name == client.find('name').text:
+                    sync_client_found = True
+            if not sync_client_found:
+                add_client_list.append(sync_client)
 
-    # Iterate the clear client list and get rid of all the clients
-    for clear_client in clear_client_list:
-        handler.sendline('destroyClient ' + clear_client.name)
-        handler.expect('admin ready>', timeout=90)
+        # Collects the clients we need to remove based off the XML output
+        for client in list_clients_xml.findall('./singleList/client'):
+            sync_client_found = False
+            for sync_client in sync_client_list:
+                if sync_client.name == client.find('name').text:
+                    sync_client_found = True
+            if not sync_client_found:
+                clear_client_list.append(sync_client)
 
-    # Iterate the add client list and insert the new clients
-    for add_client in add_client_list:
-        if add_client.ip_address == None:
-            handler.sendline('createClient %s %s allowedPorts=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports))
-            handler.expect('admin ready>')
-        else:
-            handler.sendline('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway))
-            handler.expect('admin ready>')
+        # Iterate the clear client list and get rid of all the clients
+        for clear_client in clear_client_list:
+            handler.sendline('destroyClient ' + clear_client.name)
+            handler.expect('admin ready>', timeout=90)
+
+        # Iterate the add client list and insert the new clients
+        for add_client in add_client_list:
+            if add_client.ip_address == None:
+                if add_client.authentication == None:
+                    handler.sendline('createClient %s %s allowedPorts=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports))
+                    handler.expect('admin ready>')
+                else:
+                    #print('createClient %s %s allowedPorts=%s APAuthMethod=shared encryptionMethod=ccmp keyMethod=wpa2 keyType==ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.authentication))
+                    handler.sendline('createClient %s %s allowedPorts=%s networkAuthMethod=psk encryptionMethod=ccmp keyMethod=wpa2 keyType=ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.authentication))
+                    handler.expect('admin ready>')
+            else:
+                if add_client.authentication == None:
+                    handler.sendline('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway))
+                    handler.expect('admin ready>')
+                else:
+                    #print ('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s APAuthMethod=shared encryptionMethod=ccmp keyMethod=wpa2 keyType==ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway, add_client.authentication))
+                    handler.sendline('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s networkAuthMethod=psk encryptionMethod=ccmp keyMethod=wpa2 keyType=ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway, add_client.authentication))
+                    handler.expect('admin ready>')
 
 
 def associate_veriwave_client_list(handler, client_list):
@@ -434,7 +447,7 @@ def main():
     ata_server_ip = '10.140.251.50'
     veriwave_chassis_ip = '10.140.251.53'
     admin_username = 'admin'
-    client_ssid = '\'RnD5-Soak\''
+    client_ssid = '\'RnD5-Soak-WPA\''
 
     # Setup some initial varaibles
     veriwave_wireless_port_list = []
@@ -443,6 +456,8 @@ def main():
     stop_da_event = threading.Event()
     da_per_10min = 0
     ip_addressing = None
+    authentication = None
+    aps_per_chamber = 3
 
     # Setup the session and log into ATA
     sys.stdout.write('**** Connecting to the chassis. This takes about 5 seconds.\n')
@@ -454,6 +469,7 @@ def main():
     # Clear all current settings from the chassis to make sure we have a clean environment.
     purge_clients_ports(handler)
     #clear_all_ports(handler, veriwave_chassis_ip)
+    # Be aware that the channel list must be 4 long or we are going to have issues.
     veriwave_wireless_port_list, veriwave_wired_port_list = initialize_veriwave_port_list(handler, veriwave_chassis_ip, [36, 44, 149, 157])
     # Calcualte the time this action might take to do and let the user know
     port_add_time = 5 * (len(veriwave_wireless_port_list) + len(veriwave_wired_port_list))
@@ -470,8 +486,13 @@ def main():
             disp_ip_addressing = 'DHCP'
         else:
             disp_ip_addressing = str(ip_addressing)
+        # Determine the right way to display the Authentication settings
+        if authentication == None:
+            disp_authentication = 'Open'
+        else:
+            disp_authentication = 'WPA2 PSK (' + str(authentication) + ')'
         # Display the main menu    
-        sys.stdout.write('1. Change settings\t\t\t\t\tCurrent: IP Addressing - %s\n' % (disp_ip_addressing))
+        sys.stdout.write('1. Change settings\t\t\t\t\tCurrent: IP Addressing - %s  Authentication - %s\n' % (disp_ip_addressing, disp_authentication))
         sys.stdout.write('2. Modify target client count.\t\t\t\tCurrent: %s\n' % len(veriwave_client_list))
         sys.stdout.write('3. Modify target associate/disassociate rate. \t\tCurrent: %s\n' % (da_per_10min))
         sys.stdout.write('4. Refresh display.\n')
@@ -486,11 +507,11 @@ def main():
         # Modify current global seetings
         if option == '1':
             settings_options_clean = False
-            old_ip_addressing = ip_addressing
             while not settings_options_clean:
                 # Read the input for the option and clean it up
                 sys.stdout.write('1. Change client IP Addressing method.\n')
-                sys.stdout.write('2. Back\n')
+                sys.stdout.write('2. Change client Authentication method.\n')
+                sys.stdout.write('3. Back\n')
                 sys.stdout.write('Please choose: ')
                 sys.stdout.flush()
                 option = sys.stdin.readline()
@@ -498,6 +519,7 @@ def main():
                 if option == '1':
                     settings_options_clean = True
                     ip_option_clean = False
+                    old_ip_addressing = ip_addressing
                     while not ip_option_clean:
                         # Display the change client IP addresssing method menu
                         sys.stdout.write('1. DHCP\n')
@@ -529,7 +551,7 @@ def main():
                                     client_mod_time = int(.5 * abs(new_client_count))
                                     sys.stdout.write('**** Syncing the clients. This will take about %s seconds.\n' % (client_mod_time))
                                     # Pass the new value over the the client list modifier
-                                    veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing)
+                                    veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
                                     # Sync the new client list to the ATA chassis.
                                     sync_veriwave_client_list(handler, veriwave_client_list)
                                     # Kick off the disassociate associate threading manager with the new client list
@@ -546,7 +568,6 @@ def main():
                                 sys.stdout.flush()
                                 ip_address_network = sys.stdin.readline()
                                 ip_address_network = ip_address_network.strip()
-                                print (ip_address_network)
                                 try:
                                     client_network = ipaddress.ip_network(ip_address_network)
                                     if len(list(client_network.hosts())) > 10:
@@ -564,12 +585,12 @@ def main():
                                                 # Clear out the current client list and purge the chassis
                                                 veriwave_client_list = []
                                                 sys.stdout.write('**** Purging the clients. This will take about 60 seconds.\n')
-                                                parge_clients(handler)
+                                                purge_clients(handler)
                                                 # Calculate the time it might take to do this and let the user know
                                                 client_mod_time = int(.5 * abs(new_client_count))
                                                 sys.stdout.write('**** Syncing the clients. This will take about %s seconds.\n' % (client_mod_time))
                                                 # Pass the new value over the the client list modifier
-                                                veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing)
+                                                veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
                                                 # Sync the new client list to the ATA chassis.
                                                 sync_veriwave_client_list(handler, veriwave_client_list)
                                                 # Kick off the disassociate associate threading manager with the new client list
@@ -588,6 +609,96 @@ def main():
                         else:
                             sys.stdout.write('Invalid option. Please try again.\n')
                 elif option == '2':
+                    settings_options_clean = True
+                    auth_option_clean = False
+                    old_authentication = authentication
+                    while not auth_option_clean:
+                        # Display the change client Authentication method menu
+                        sys.stdout.write('1. Open\n')
+                        sys.stdout.write('2. WPA2 PSK\n')
+                        sys.stdout.write('3. Back\n')
+                        # Read the input for the option and clean it up
+                        sys.stdout.write('Please choose: ')
+                        sys.stdout.flush()
+                        option = sys.stdin.readline()
+                        option = option.strip()
+                        # Deal with the Open Authentication option
+                        if option == '1':
+                            auth_option_clean = True
+                            # Set the Authentication method to Open
+                            authentication = None
+                            # Check to see if the authentication method has changed
+                            if authentication == old_authentication:
+                                sys.stdout.write('**** The Authentication scheme has not been changed. No modifications will occur.\n')
+                            else:
+                                sys.stdout.write('**** The Authentication scheme has been changed. The client list will be rebuilt if needed.\n')
+                                if len(veriwave_client_list) > 0:
+                                    # Stop the associate disassociate threading
+                                    stop_da_event.set()
+                                    # Grab the old list length so we can replicate it.
+                                    new_client_count = len(veriwave_client_list)
+                                    # Clear out the current client list and purge the chassis
+                                    veriwave_client_list = []
+                                    sys.stdout.write('**** Purging the clients. This will take about 60 seconds.\n')
+                                    purge_clients(handler)
+                                    # Calculate the time it might take to do this and let the user know
+                                    client_mod_time = int(.5 * abs(new_client_count))
+                                    sys.stdout.write('**** Syncing the clients. This will take about %s seconds.\n' % (client_mod_time))
+                                    # Pass the new value over the the client list modifier
+                                    veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
+                                    # Sync the new client list to the ATA chassis.
+                                    sync_veriwave_client_list(handler, veriwave_client_list)
+                                    # Kick off the disassociate associate threading manager with the new client list
+                                    stop_da_event = threading.Event()
+                                    da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
+                                    da_thread.start()
+                        elif option == '2':
+                            auth_option_clean = True
+                            # Set the Authentication method to WPA2 PSK and get the needed details
+                            auth_wpa_input_clean = False
+                            while not auth_wpa_input_clean:
+                                sys.stdout.write('Enter the client WPA2 Pre Shared Key: ')
+                                sys.stdout.flush()
+                                authentication_input = sys.stdin.readline()
+                                authentication_input = authentication_input.strip()
+                                # Check to make sure the input is decent. WPA2 is between 8 and 63 characters. The slash is so that we can do file input later.
+                                if len(authentication_input) > 7 and len(authentication_input) < 64 and authentication_input[0] != '/':
+                                    authentication = authentication_input
+                                    auth_wpa_input_clean = True
+                                    if authentication == old_authentication:
+                                        sys.stdout.write('**** The Authentication scheme has not been changed. No modifications will occur.\n')
+                                    else:
+                                        sys.stdout.write('**** The Authentication scheme has been changed. The client list will be rebuilt if needed.\n')
+                                        if len(veriwave_client_list) > 0:
+                                            # Stop the associate disassociate threading
+                                            stop_da_event.set()
+                                            # Grab the old list length so we can replicate it.
+                                            new_client_count = len(veriwave_client_list)
+                                            # Clear out the current client list and purge the chassis
+                                            veriwave_client_list = []
+                                            sys.stdout.write('**** Purging the clients. This will take about 60 seconds.\n')
+                                            purge_clients(handler)
+                                            # Calculate the time it might take to do this and let the user know
+                                            client_mod_time = int(.5 * abs(new_client_count))
+                                            sys.stdout.write('**** Syncing the clients. This will take about %s seconds.\n' % (client_mod_time))
+                                            # Pass the new value over the the client list modifier
+                                            veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
+                                            # Sync the new client list to the ATA chassis.
+                                            sync_veriwave_client_list(handler, veriwave_client_list)
+                                            # Kick off the disassociate associate threading manager with the new client list
+                                            stop_da_event = threading.Event()
+                                            da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
+                                            da_thread.start()
+                                # This seems to be an invalid WPA2 PSK.
+                                else:
+                                    sys.stdout.write('Input is invalid. Please enter a valid WPA2 PSK.\n')
+                            sys.stdout.write('**** New WPA2 PSK is %s.\n' % (authentication))
+                        elif option == '3':
+                            auth_option_clean = True
+                            settings_options_clean = False
+                        else:
+                            sys.stdout.write('Invalid option. Please try again.\n')
+                elif option == '3':
                     settings_options_clean = True
                 else:
                     sys.stdout.write('Invalid option. Please try again.\n')
@@ -613,7 +724,7 @@ def main():
             client_mod_time = int(.5 * abs((len(veriwave_client_list) - new_client_count)))
             sys.stdout.write('**** Syncing the clients. This will take about %s seconds.\n' % (client_mod_time))
             # Pass the new value over the the client list modifier
-            veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing)
+            veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
             # Sync the new client list to the ATA chassis.
             sync_veriwave_client_list(handler, veriwave_client_list)
             # Kick off the disassociate associate threading manager with the new client list
