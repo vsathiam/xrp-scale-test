@@ -40,6 +40,7 @@ class wap(object):
 
                 # Use invoke_shell to establish an 'interactive session'
                 self.remote_conn = self.remote_conn_pre.invoke_shell()
+                print "Session established to ", self.hostname
 
                 if verbose:
                         print("Interactive SSH session established")
@@ -72,7 +73,7 @@ class wap(object):
                 if self.remote_conn.recv_ready():
                         return self.remote_conn.recv(self.MAX_BUFFER).decode('utf-8')
                 else:
-                        print "Nothing to clear"
+                        #print "Nothing to clear"
                         return None
 
 
@@ -194,9 +195,12 @@ class wap(object):
                 current_state = "looking_for_marker"
                 csvfile = filename.rsplit('.txt')[0]+".csv"
                 cpu_mem_state = ""
-                csv_row_header = ["Timestamp", "Software Interrupts", "Free Memory"]
+                csv_row_header = ["Timestamp", "AP_IP", "Software Interrupts", "Free Memory"]
                 csv_row_values = []
                 csv_write_header_state = "not_written"
+                skip_first = "not_parsed_ap_ip"
+                ap_ip = "0.0.0.0"
+                
 
                 try:
                         top_file = open(filename)
@@ -206,6 +210,11 @@ class wap(object):
 
                 for line in top_file:
                         line = line.rstrip('\n')
+                        
+                        if skip_first == "not_parsed_ap_ip":
+                                ap_ip = line.rsplit(" ")[5]
+                                skip_first = "parsed_ap_ip"
+                        
                         if re.findall(start_pattern, line):
                                 timestamp = line.rsplit(' ')[1]+' '+line.rsplit(' ')[2]
                                 #print "Timestamp:", timestamp
@@ -215,24 +224,30 @@ class wap(object):
                                         csv_write_header_state = "written"
 
                                 csv_row_values.append(timestamp)
+                                csv_row_values.append(ap_ip)
+                                
                         elif re.findall(end_pattern,line):
                                 skip_line = 0
                                 current_state = "looking_for_marker"
+                                cpu_mem_state = ""
+                                csv_row_values = []
+                                        
                         else:
                                 if current_state == "looking_to_process":
                                         skip_line += 1
+                                        timestamp_skipped = "notwritten"
                                         if skip_line == cpu_start_line:
                                                 process_data = re.findall(r"[\w.()%:\-/]+", line)
                                                 si = process_data[-2].rsplit('%')[0]
                                                 hi = process_data[-3]
                                                 cpu_mem_state = "cpu"
-                                                print "Software Interrupt:", si
+                                                #print "Software Interrupt:", si
                                                 csv_row_values.append(si)
                                         if skip_line == mem_start_line:
                                                 process_data = re.findall(r"[\w:]+", line)
                                                 free_mem = process_data[-4]
                                                 cpu_mem_state += "mem"
-                                                print "Free Memory:", free_mem
+                                                #print "Free Memory:", free_mem
                                                 csv_row_values.append(free_mem)
 
                                         if cpu_mem_state == "cpumem":
@@ -306,12 +321,12 @@ class wap(object):
                         if skip_first == "not_parsed_ap_ip":
                                 ap_ip = line.rsplit(" ")[5]
                                 skip_first = "parsed_ap_ip"
-                                print ap_ip
+                                #print ap_ip
                         
                         
                         if re.findall(start_pattern, line):
                                 timestamp = line.rsplit(' ')[1]+' '+line.rsplit(' ')[2]
-                                print "Timestamp:", timestamp
+                                #print "Timestamp:", timestamp
                                 current_state = "looking_to_process"
                                 if csv_write_header_state == "not_written":
                                         self.write_csv(csvfile,csv_row_header)
