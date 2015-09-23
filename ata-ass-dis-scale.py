@@ -32,6 +32,7 @@ class VeriWavePort(object):
         self.type = port_type
         self.frequency = chan_freq_map[str(channel)]
         self.clients = []
+        self.bssids = dict()
 
 
     def __repr__(self):
@@ -45,19 +46,19 @@ class VeriWavePort(object):
 class VeriWaveClient(object):
     # Class for storing information about VeriWave clients
 
-    def __init__(self, name, ssid, allowed_ports, ip_address=None, gateway=None, authentication = None):
+    def __init__(self, name, ssid, allowed_ports, ip_address=None, gateway=None, authentication = None, bssid_preference = None):
         self.name = name
         self.ssid = ssid
         self.allowed_ports = allowed_ports
         self.ip_address = ip_address
         self.gateway = gateway
         self.authentication = authentication
+        self.bssid_preference = bssid_preference
 
     def __repr__(self):
         return "\nname: %s\nssid: %s\nallowed ports: %s ip address: %s gateway: %s\n" % (self.name, self.ssid, self.allowed_ports, self.ip_address, self.gateway)
     def __str__(self):
         return "\nname: %s\nssid: %s\nallowed ports: %s ip address: %s gateway: %s\n" % (self.name, self.ssid, self.allowed_ports, self.ip_address, self.gateway)
-
 
 def session_setup(ata_ip, ata_user,debug=False):
     # This function logs into the ATA and sets some parameters we want to user for the session
@@ -94,6 +95,7 @@ def clear_all_ports(handler, chassis_ip):
     # Send the command to list all of the ports and grab the output
     handler.sendline('list ports')
     handler.expect('admin ready>')
+    list_ports_output = None
     list_ports_output = handler.before.decode('utf-8', 'ignore')
 
     # Parse the output into XML handler. Weirdness in string formatting is because the output includes the 'list ports' command we typed above.
@@ -128,6 +130,7 @@ def initialize_veriwave_port_list(handler, chassis, channel_list):
     handler.expect('admin ready>', timeout=160)
 
     # Grab the output of the command and parse the XML
+    get_chassis_info_output = None
     get_chassis_info_output = handler.before.decode('utf-8', 'ignore')
     get_chassis_info_xml = ET.fromstring('\n'.join(get_chassis_info_output.split('\n')[1:]))
 
@@ -214,16 +217,23 @@ def modify_veriwave_client_list(client_list, port_list, ssid, target_count, clie
         client_name = 'c' + str("%06d" % len(client_list)) + '_'
         client_name += port_list[add_client_port_iterator].port_name
 
+        # Determine the BSSID this client is going to prefer. Increment the count.
+        if len(port_list[add_client_port_iterator].bssids) != 0:
+            client_bssid_pref = min(port_list[add_client_port_iterator].bssids, key=port_list[add_client_port_iterator].bssids.get)
+            port_list[add_client_port_iterator].bssids[client_bssid_pref] += 1
+        else:
+            client_bssid_pref = None
+
         # Add the new client name into the port object it will be associated with
         port_list[add_client_port_iterator].clients.append(client_name)
 
         if client_network == None:
             # Append the new client object to the end of the client list without IP address information (DHCP)
-            client_list.append(VeriWaveClient(client_name, ssid, port_list[add_client_port_iterator].port_name, authentication))
+            client_list.append(VeriWaveClient(client_name, ssid, port_list[add_client_port_iterator].port_name, authentication = authentication, bssid_preference = client_bssid_pref))
         else:
             # Append the new client object to the end of the client list with an iterated IP address (Static)
             client_interface = ipaddress.IPv4Interface(str(list(client_network.hosts())[len(client_list)+ip_host_offset]) + '/' + client_netmask)
-            client_list.append(VeriWaveClient(client_name, ssid, port_list[add_client_port_iterator].port_name, client_interface, client_gateway, authentication))
+            client_list.append(VeriWaveClient(client_name, ssid, port_list[add_client_port_iterator].port_name, ip_address = client_interface, gateway = client_gateway, authentication = authentication, bssid_preference = client_bssid_pref))
 
         # Deal with properly iterating the port list insertion point for the next client to be added
         add_client_port_iterator += 1
@@ -244,21 +254,26 @@ def modify_veriwave_client_list(client_list, port_list, ssid, target_count, clie
         for port in port_list:
             if remove_client_name in port.clients:
                 port.clients.remove(remove_client_name)
+                # Decrement the BSSID count so that we can keep loading even
+                port.bssids[client_list[-1].bssid_preference]
+        # Finally pop it off the list
         client_list.pop()
 
     # Return our new client list and port list
     return client_list, port_list
 
-def sync_veriwave_port_list(handler, sync_port_list):
+def sync_veriwave_port_list(handler, wired_sync_port_list, wireless_sync_port_list):
     # This function synchronizes the ATA port configuration to the sync_port_list that is passed to it.
 
     # Setup our varabiles
     clear_port_list = list()
     add_port_list = list()
+    sync_port_list = wired_sync_port_list + wireless_sync_port_list
 
     # Send the command to list all of the ports and grab the output
     handler.sendline('list ports')
     handler.expect('admin ready>')
+    list_ports_output = None
     list_ports_output = handler.before.decode('utf-8', 'ignore')
 
     # Parse the output into XML handler. Weirdness in string formatting is because the output includes the 'list ports' command we typed above.
@@ -289,14 +304,37 @@ def sync_veriwave_port_list(handler, sync_port_list):
         handler.expect('admin ready>', timeout=90)
 
     # Iterate the add port list and insert the new ports
+    portbind_retry = 3
     for add_port in add_port_list:
-        handler.sendline('bindPort %s %s %s %s' % (add_port.port_name, add_port.chassis, add_port.slot_num, add_port.port_num))
-        handler.expect('admin ready>', timeout=90)
+        for i in range(portbind_retry):
+            sys.stdout.write ('**** Binding port %s. Retry %s.\n' % (add_port.port_name, i))
+            handler.sendline('bindPort %s %s %s %s' % (add_port.port_name, add_port.chassis, add_port.slot_num, add_port.port_num))
+            handler.expect('admin ready>', timeout=90)
+            bindport_output = None
+            bindport_output = handler.before.decode('utf-8', 'ignore')
+
+            # Check to make sure the port actually added successfully.
+            # Parse the output into XML handler. Weirdness in string formatting is because the output includes the 'list ports' command we typed above.
+            bindport_xml = ET.fromstring('\n'.join(bindport_output.split('\n')[1:]))
+
+            # Check to see if we break out
+            if bindport_xml.find('./cmdStatus').text == 'ok':
+                break
+
+        # Check to see if the last portbind attempt failed.
+        if bindport_xml.find('./cmdStatus').text != 'ok':
+            sys.stdout.write ('**** Possible error with port. Removing - %s' % (add_port.port_name))
+            if add_port.port_name[0] == 'w':
+                wireless_sync_port_list.remove(add_port)
+            else:
+                wireless_sync_port_list.remove(add_port)
 
     # Set the channels
-    for sync_port in sync_port_list:
+    for sync_port in wireless_sync_port_list:
         handler.sendline('setChannel %s %s %s' % (sync_port.port_name, sync_port.frequency, sync_port.channel))
         handler.expect('admin ready>')
+
+    return wired_sync_port_list, wireless_sync_port_list
 
 def purge_clients_ports(handler):
     # Relase all ports and clear out all the clients in the system
@@ -311,7 +349,6 @@ def purge_clients(handler):
 
     handler.sendline('purge clients')
     handler.expect('admin ready>', timeout=90)
-
 
 def sync_veriwave_client_list(handler, sync_client_list):
     # This function synchronizes the ATA client configuration to the sync_client_list that is passed to it.
@@ -329,6 +366,7 @@ def sync_veriwave_client_list(handler, sync_client_list):
         # Send to command to list all of the clients and grab the output.
         handler.sendline('list clients')
         handler.expect('admin ready>')
+        list_clients_output = None
         list_clients_output = handler.before.decode('utf-8', 'ignore')
 
         # Parse the output into XML handler.  Weirdness in string formatting is because the output includes the 'list clients' command we typed above.
@@ -359,23 +397,47 @@ def sync_veriwave_client_list(handler, sync_client_list):
 
         # Iterate the add client list and insert the new clients
         for add_client in add_client_list:
+            # Base portion
+            base_portion = 'createClient %s %s allowedPorts=%s ' % (add_client.name, add_client.ssid, add_client.allowed_ports)
+            # IP Address portion
             if add_client.ip_address == None:
-                if add_client.authentication == None:
-                    handler.sendline('createClient %s %s allowedPorts=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports))
-                    handler.expect('admin ready>')
-                else:
-                    #print('createClient %s %s allowedPorts=%s APAuthMethod=shared encryptionMethod=ccmp keyMethod=wpa2 keyType==ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.authentication))
-                    handler.sendline('createClient %s %s allowedPorts=%s networkAuthMethod=psk encryptionMethod=ccmp keyMethod=wpa2 keyType=ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.authentication))
-                    handler.expect('admin ready>')
+                ip_portion = ''
             else:
-                if add_client.authentication == None:
-                    handler.sendline('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway))
-                    handler.expect('admin ready>')
-                else:
-                    #print ('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s APAuthMethod=shared encryptionMethod=ccmp keyMethod=wpa2 keyType==ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway, add_client.authentication))
-                    handler.sendline('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s networkAuthMethod=psk encryptionMethod=ccmp keyMethod=wpa2 keyType=ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway, add_client.authentication))
-                    handler.expect('admin ready>')
+                ip_portion = 'IP=%s subnetMask=%s gateway=%s ' % (add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway)
 
+            # Authentication portion
+            if add_client.authentication == None:
+                auth_portion = ''
+            else:
+                auth_portion = 'networkAuthMethod=psk encryptionMethod=ccmp keyMethod=wpa2 keyType=ascii networkKey=%s ' % (add_client.authentication)
+
+            # BSSID portion
+            if add_client.bssid_preference == None:
+                bssid_portion = ''
+            else:
+                bssid_portion = 'BSSID=%s ' % (add_client.bssid_preference)
+
+            # Finally send the command to the chassis and hope all goes well
+            print (base_portion + ip_portion + auth_portion + bssid_portion)
+            handler.sendline(base_portion + ip_portion + auth_portion + bssid_portion)
+            handler.expect('admin ready>')
+
+            #if add_client.ip_address == None:
+            #     if add_client.authentication == None:
+            #        handler.sendline('createClient %s %s allowedPorts=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports))
+            #        handler.expect('admin ready>')
+            #    else:
+            #        #print('createClient %s %s allowedPorts=%s APAuthMethod=shared encryptionMethod=ccmp keyMethod=wpa2 keyType==ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.authentication))
+            #        handler.sendline('createClient %s %s allowedPorts=%s networkAuthMethod=psk encryptionMethod=ccmp keyMethod=wpa2 keyType=ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.authentication))
+            #        handler.expect('admin ready>')
+            #else:
+            #    if add_client.authentication == None:
+            #        handler.sendline('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway))
+            #        handler.expect('admin ready>')
+            #    else:
+            #        #print ('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s APAuthMethod=shared encryptionMethod=ccmp keyMethod=wpa2 keyType==ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway, add_client.authentication))
+            #        handler.sendline('createClient %s %s allowedPorts=%s IP=%s subnetMask=%s gateway=%s networkAuthMethod=psk encryptionMethod=ccmp keyMethod=wpa2 keyType=ascii networkKey=%s' % (add_client.name, add_client.ssid, add_client.allowed_ports, add_client.ip_address.ip, add_client.ip_address.netmask, add_client.gateway, add_client.authentication))
+            #        handler.expect('admin ready>')
 
 def associate_veriwave_client_list(handler, client_list):
     # This functions looks at the clients on the chassis and associates them if they are both on the client list and currently disassociated.
@@ -387,6 +449,7 @@ def associate_veriwave_client_list(handler, client_list):
     # Send to command to list all of the clients and grab the output.
     handler.sendline('list clients')
     handler.expect('admin ready>')
+    list_clients_output = None
     list_clients_output = handler.before.decode('utf-8', 'ignore')
 
     # Parse the output into XML handler.  Weirdness in string formatting is because the output includes the 'list clients' command we typed above.
@@ -396,7 +459,6 @@ def associate_veriwave_client_list(handler, client_list):
     for client in associate_client_list:
         handler.sendline('associateClient %s' % (client))
         handler.expect('admin ready>')
-
 
 def ass_dis_manager(handler, client_list, da_per_10min, stop_event):
     # This function is intended to be run as a thread. It basically disassociates then associates every client in the client list in order with a delay.
@@ -428,6 +490,7 @@ def get_client_info(handler):
     # Send the 'list clients' command and grab the output
     handler.sendline('list clients')
     handler.expect('admin ready>')
+    list_clients_output = None
     list_clients_output = handler.before.decode('utf-8', 'ignore')
 
     # Parse the output into XML handler. Weirdness in string formatting is because the output includes the 'list clients' command we typed above.
@@ -440,6 +503,29 @@ def get_client_info(handler):
     busy = list_clients_xml.find('./clientCount/busy').text
 
     return ready, idle, disabled, busy
+
+def get_port_bssids(handler, ports, ssid):
+    # This function takes a handler, the list of VeriWave ports, and the SSID of interested and returns a list of BSSIDs
+    for port in ports:
+        # Initialize the list for this port
+        new_bssids = dict()
+        # Send the command to scan for BSSIDs on the port. The port must be synced first otherwise this is going to fail.
+        handler.sendline('scanBSS %s ssid=%s' % (port.port_name, ssid))
+        handler.expect('admin ready>')
+        scanbss_output = None
+        scanbss_output = handler.before.decode('utf-8', 'ignore')
+
+        # Parse the output into XML handler. Weirdness in string formatting is because the output include the 'scanBSS <port_name>' command we typed above.
+        scanbss_xml = ET.fromstring('\n'.join(scanbss_output.split('\n')[1:]))
+
+        for ap in scanbss_xml.findall('./APList/AP'):
+            # Add the BSSID for the AP into the list
+            new_bssids[ap.find('BSSID').text] = 0
+
+        # Assign the newly found BSSIDs
+        port.bssids = new_bssids
+
+    return ports
 
 
 def main():
@@ -475,7 +561,11 @@ def main():
     port_add_time = 5 * (len(veriwave_wireless_port_list) + len(veriwave_wired_port_list))
     sys.stdout.write('**** Syncing the ports. This will take about %s seconds.\n' % (port_add_time))
     # Sync the settings to the ATA chassis.
-    sync_veriwave_port_list(handler, veriwave_wired_port_list + veriwave_wireless_port_list)
+    veriwave_wired_port_list, veriwave_wireless_port_list = sync_veriwave_port_list(handler, veriwave_wired_port_list, veriwave_wireless_port_list)
+    # Fill out the BSSID info for each wireless port.
+    scan_bssid_time = 2 * (len(veriwave_wireless_port_list))
+    sys.stdout.write('**** Collecting the BSSIDs for each port. This will take about %s seconds.\n' % (scan_bssid_time))
+    veriwave_wireless_port_list = get_port_bssids (handler, veriwave_wireless_port_list, client_ssid)
 
     while True:
         # Display some status info
