@@ -84,7 +84,7 @@ def session_setup(ata_ip, ata_user,debug=False):
 def session_end(handler):
     # This function disconnects from ATA cleanly
     handler.sendline('exit')
-    handler.expect('Goodbye')
+    handler.expect('Goodbye', timeout = 180)
 
 def clear_all_ports(handler, chassis_ip):
     # This function clears all port associations for a given chassis IP
