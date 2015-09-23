@@ -2,7 +2,7 @@ from glob import glob
 import os, time, csv
 
 
-def generate_singlecsv(csvinputfilepath, csvoutputfilepath):
+def generate_singlecsv(csvinputfilepath, csvoutputfilepath, search, rows):
     
     '''
     Combine several CSV files (generated from output of show stations executed
@@ -11,9 +11,9 @@ def generate_singlecsv(csvinputfilepath, csvoutputfilepath):
     '''
    
     timestring = time.strftime("%m.%d.%y.%H.%M.%S", time.localtime())
-    csvinputfile = os.path.join(csvinputfilepath, "WAP-sta-count-*.csv")
+    csvinputfile = os.path.join(csvinputfilepath, search)
     csvoutputfile = os.path.join(csvoutputfilepath, "Combined-"+timestring+".csv")
-    rows = ["Timestamp", "AP_IP", "2.4GHz Stations", "5GHz Stations"]
+    
     
     print "CSV IN",csvinputfile, "CSV OUT", csvoutputfile
     
@@ -27,6 +27,10 @@ def generate_singlecsv(csvinputfilepath, csvoutputfilepath):
             f.next()
             for line in f:
                 singlefile.write(line)
-                
 
-generate_singlecsv("/Users/vsathiam/Documents/LOGS", "/Users/vsathiam/Documents/LOGS/combined")
+
+rows_count = ["Timestamp", "AP_IP", "2.4GHz Stations", "5GHz Stations"]  
+rows_top = ["Timestamp", "AP_IP", "Software Interrupts", "Free Memory"]
+search_count = "WAP-sta-count-*.csv"
+
+generate_singlecsv("/Users/vsathiam/Documents/LOGS", "/Users/vsathiam/Documents/LOGS/combined", search_count, rows_count)
