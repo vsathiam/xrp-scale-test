@@ -415,10 +415,11 @@ def sync_veriwave_client_list(handler, sync_client_list):
             if add_client.bssid_preference == None:
                 bssid_portion = ''
             else:
-                bssid_portion = 'BSSID=%s ' % (add_client.bssid_preference)
+                #bssid_portion = 'BSSID=%s ' % (add_client.bssid_preference)
+                bssid_portion = 'distribute=balanced '
 
             # Finally send the command to the chassis and hope all goes well
-            print (base_portion + ip_portion + auth_portion + bssid_portion)
+            #print (base_portion + ip_portion + auth_portion + bssid_portion)
             handler.sendline(base_portion + ip_portion + auth_portion + bssid_portion)
             handler.expect('admin ready>')
 
@@ -463,8 +464,8 @@ def associate_veriwave_client_list(handler, client_list):
 def ass_dis_manager(handler, client_list, da_per_10min, stop_event):
     # This function is intended to be run as a thread. It basically disassociates then associates every client in the client list in order with a delay.
 
-    # Calculate the delay factor.
     if da_per_10min != 0:
+        # Calculate the delay factor.
         # Take the passed number and refactor it into disassociates/assoicates (da) per second.
         rate_in_da_per_sec = float(da_per_10min) / (10*60)
         # Inverse the rate to get seconds per disassociates/associates. Divide this by two so we spread out the assoication and disassociation
@@ -481,6 +482,23 @@ def ass_dis_manager(handler, client_list, da_per_10min, stop_event):
                 #handler.expect('admin ready>')
                 time.sleep(delay_time)
                 # Adding this so we don't have to wait until we have gone thru the entire list. That might take a while depending on the length of the list
+                if stop_event.is_set():
+                    break
+
+def roam_manager (handler, client_list, roam_per_10min, stop_event):
+    # This function is intended to be run as a thread. It romams every client in the client list in order with a delay.
+
+    if roam_per_10min != 0:
+        # Calculate the delay factor
+        rate_in_roams_per_sec = float(roam_per_10min) / (10*60)
+        delay_time = (1.0 / rate_in_roams_per_sec)
+
+        while (not stop_event.is_set()):
+            for client in client_list:
+                # Roam the client the sleep
+                handler.sendline('roamclient %s BSSID=balanced' % (client.name))
+                time.sleep(delay_time)
+                # This is so that we can bail out mid list. Hopefully we aren't doing 1 roam per 10 min...
                 if stop_event.is_set():
                     break
 
@@ -540,7 +558,9 @@ def main():
     veriwave_wired_port_list = []
     veriwave_client_list = []
     stop_da_event = threading.Event()
+    stop_roam_event = threading.Event()
     da_per_10min = 0
+    roam_per_10min = 0
     ip_addressing = None
     authentication = None
     aps_per_chamber = 3
@@ -549,6 +569,7 @@ def main():
     sys.stdout.write('**** Connecting to the chassis. This takes about 5 seconds.\n')
     handler = session_setup(ata_server_ip, admin_username)
     ass_dis_handler = session_setup(ata_server_ip, admin_username)
+    roam_handler = session_setup(ata_server_ip, admin_username)
 
     # Setup the initial port list. This is simple and stupid. Pull all the ports from a given chassis and drop them into a list.
     sys.stdout.write('**** Preparing the chassis. This can take up to 60 seconds.\n')
@@ -585,8 +606,9 @@ def main():
         sys.stdout.write('1. Change settings\t\t\t\t\tCurrent: SSID - %s  IP Addressing - %s  Authentication - %s\n' % (client_ssid, disp_ip_addressing, disp_authentication))
         sys.stdout.write('2. Modify target client count.\t\t\t\tCurrent: %s\n' % len(veriwave_client_list))
         sys.stdout.write('3. Modify target associate/disassociate rate. \t\tCurrent: %s\n' % (da_per_10min))
-        sys.stdout.write('4. Refresh display.\n')
-        sys.stdout.write('5. Clear config and exit.\n')
+        sys.stdout.write('4. Modify target roam rate. \t\t\t\tCurrent: %s\n' % (roam_per_10min))
+        sys.stdout.write('5. Refresh display.\n')
+        sys.stdout.write('6. Clear config and exit.\n')
         sys.stdout.write('Please choose: ')
         
         # Read the users input and clean it up
@@ -629,8 +651,9 @@ def main():
                             else:
                                 sys.stdout.write('**** The IP addressing scheme has been changed. The client list will be rebuilt if needed.\n')
                                 if len(veriwave_client_list) > 0:
-                                    # Stop the associate disassociate threading
+                                    # Stop the threading managers
                                     stop_da_event.set()
+                                    stop_roam_event.set()
                                     # Grab the old list length so we can replicate it.
                                     new_client_count = len(veriwave_client_list)
                                     # Clear out the current client list and purge the chassis
@@ -644,10 +667,15 @@ def main():
                                     veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
                                     # Sync the new client list to the ATA chassis.
                                     sync_veriwave_client_list(handler, veriwave_client_list)
-                                    # Kick off the disassociate associate threading manager with the new client list
+                                    # Kick off the threading managers with the new client list
                                     stop_da_event = threading.Event()
+                                    stop_roam_event = threading.Event()
+
                                     da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
+                                    roam_thread = threading.Thread(target = roam_manager, args = (roam_handler, veriwave_client_list, roam_per_10min, stop_roam_event))
+
                                     da_thread.start()
+                                    roam_thread.start()
 
                         elif option == '2':
                             ip_option_clean = True
@@ -668,8 +696,9 @@ def main():
                                         else:
                                             sys.stdout.write('**** The IP addressing scheme has been changed. The client list will be rebuilt if needed.\n')
                                             if len(veriwave_client_list) > 0:
-                                                # Stop the associate disassociate threading
+                                                # Stop the threading managers
                                                 stop_da_event.set()
+                                                stop_roam_event.set()
                                                 # Grab the old list length so we can replicate it.
                                                 new_client_count = len(veriwave_client_list)
                                                 # Clear out the current client list and purge the chassis
@@ -683,10 +712,15 @@ def main():
                                                 veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
                                                 # Sync the new client list to the ATA chassis.
                                                 sync_veriwave_client_list(handler, veriwave_client_list)
-                                                # Kick off the disassociate associate threading manager with the new client list
+                                                # Kick off the threading managers with the new client list
                                                 stop_da_event = threading.Event()
+                                                stop_roam_event = threading.Event()
+
                                                 da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
+                                                roam_thread = threading.Thread(target = roam_manager, args = (roam_handler, veriwave_client_list, roam_per_10min, stop_roam_event))
+
                                                 da_thread.start()
+                                                roam_thread.start()
 
                                     else:
                                         sys.stdout.write('This is not enough hosts. Please enter a subnet with more hosts.')
@@ -723,8 +757,9 @@ def main():
                             else:
                                 sys.stdout.write('**** The Authentication scheme has been changed. The client list will be rebuilt if needed.\n')
                                 if len(veriwave_client_list) > 0:
-                                    # Stop the associate disassociate threading
+                                    # Stop the threading managers
                                     stop_da_event.set()
+                                    stop_roam_event.set()
                                     # Grab the old list length so we can replicate it.
                                     new_client_count = len(veriwave_client_list)
                                     # Clear out the current client list and purge the chassis
@@ -740,8 +775,14 @@ def main():
                                     sync_veriwave_client_list(handler, veriwave_client_list)
                                     # Kick off the disassociate associate threading manager with the new client list
                                     stop_da_event = threading.Event()
+                                    stop_roam_event = threading.Event()
+
                                     da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
+                                    roam_thread = threading.Thread(target = roam_manager, args = (roam_handler, veriwave_client_list, roam_per_10min, stop_roam_event))
+
                                     da_thread.start()
+                                    roam_thread.start()
+
                         elif option == '2':
                             auth_option_clean = True
                             # Set the Authentication method to WPA2 PSK and get the needed details
@@ -760,8 +801,9 @@ def main():
                                     else:
                                         sys.stdout.write('**** The Authentication scheme has been changed. The client list will be rebuilt if needed.\n')
                                         if len(veriwave_client_list) > 0:
-                                            # Stop the associate disassociate threading
+                                            # Stop the threading managers
                                             stop_da_event.set()
+                                            stop_roam_event.set()
                                             # Grab the old list length so we can replicate it.
                                             new_client_count = len(veriwave_client_list)
                                             # Clear out the current client list and purge the chassis
@@ -777,8 +819,13 @@ def main():
                                             sync_veriwave_client_list(handler, veriwave_client_list)
                                             # Kick off the disassociate associate threading manager with the new client list
                                             stop_da_event = threading.Event()
+                                            stop_roam_event = threading.Event()
+
                                             da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
+                                            roam_thread = threading.Thread(target = roam_manager, args = (roam_handler, veriwave_client_list, roam_per_10min, stop_roam_event))
+
                                             da_thread.start()
+                                            roam_thread.start()
                                 # This seems to be an invalid WPA2 PSK.
                                 else:
                                     sys.stdout.write('Input is invalid. Please enter a valid WPA2 PSK.\n')
@@ -808,8 +855,9 @@ def main():
                 except:
                     sys.stdout.write('Not a valid input, please try again.\n')
 
-            # Stop the associate/disassociate threader if it is running. If not then this shouldn't affect anything
+            # Stop the threaders if they are running. If not then this shouldn't affect anything
             stop_da_event.set()
+            stop_roam_event.set()
             # Calculate the time it might take to do this and let the user know
             client_mod_time = int(.5 * abs((len(veriwave_client_list) - new_client_count)))
             sys.stdout.write('**** Syncing the clients. This will take about %s seconds.\n' % (client_mod_time))
@@ -817,10 +865,15 @@ def main():
             veriwave_client_list, veriwave_wireless_port_list = modify_veriwave_client_list(veriwave_client_list, veriwave_wireless_port_list, client_ssid, new_client_count, client_network = ip_addressing, aps_per_chamber = aps_per_chamber, authentication = authentication)
             # Sync the new client list to the ATA chassis.
             sync_veriwave_client_list(handler, veriwave_client_list)
-            # Kick off the disassociate associate threading manager with the new client list
+            # Kick off the thread managers with the new client list
             stop_da_event = threading.Event()
+            stop_roam_event = threading.Event()
+
             da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
+            roam_thread = threading.Thread(target = roam_manager, args = (roam_handler, veriwave_client_list, roam_per_10min, stop_roam_event))
+
             da_thread.start()
+            roam_thread.start()
             # Some debugging
             #print (veriwave_client_list)
 
@@ -828,8 +881,8 @@ def main():
         elif option == '3':
             new_ass_dis_rate_clean = False
             while not new_ass_dis_rate_clean:
-                # Read the intput for the new value and clean it up
-                sys.stdout.write('Please enter new association/disassoication rate in a per client per 10 min value. For example, if you enter 1, each client will disassociate and reassociate once every 10 minutes: ')
+                # Read the input for the new value and clean it up
+                sys.stdout.write('Please enter new association/disassoication rate in a per 10 min value. For example, if you enter 1, one client will disassociate and reassociate once in a 10 minute window: ')
                 sys.stdout.flush()
                 new_ass_dis_rate = sys.stdin.readline()
                 try:
@@ -845,15 +898,37 @@ def main():
             da_thread = threading.Thread(target = ass_dis_manager, args = (ass_dis_handler, veriwave_client_list, da_per_10min, stop_da_event))
             da_thread.start()
 
-        # Refresh display option.
+        # Modify target roam rate option.
         elif option == '4':
+            new_roam_rate_clean = False
+            while not new_roam_rate_clean:
+                # Read the input for the new claue and lcean it up
+                sys.stdout.write('Please enter new roam rate in a per 10 min value. For example, if you enter 1, one client will roam every 10 minutes: ')
+                sys.stdout.flush()
+                new_roam_rate = sys.stdin.readline()
+                try:
+                    roam_per_10min = int(new_roam_rate.strip())
+                    new_roam_rate_clean = True
+                except:
+                    sys.stdout.write('Not a valid input, please try again.\n')
+
+            # Stop the current thread if it is running. If not that isn't an issue.
+            stop_roam_event.set()
+            # Kick off the disassociate associate threading manager with the new rate
+            stop_roam_event = threading.Event()
+            roam_thread = threading.Thread(target = roam_manager, args = (roam_handler, veriwave_client_list, roam_per_10min, stop_roam_event))
+            roam_thread.start()
+
+        # Refresh display option.
+        elif option == '5':
             pass
 
         # Clean up and exit option
-        elif option == '5':
+        elif option == '6':
             # Purge everything
             sys.stdout.write('**** Cleaning up the chassis. This can take up to 90 seconds.\n')
             stop_da_event.set()
+            stop_roam_event.set()
             purge_clients_ports(handler)
             session_end(handler)
             session_end(ass_dis_handler)
